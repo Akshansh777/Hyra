@@ -1,0 +1,6 @@
+{
+  "name": "Hyra",
+  "description": "AI Corporate Helpdesk & Autonomous Workplace Assistant with real-time voice barge-in, Firestore operations dashboard, and mock interview analytics lab.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

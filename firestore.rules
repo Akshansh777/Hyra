@@ -1,0 +1,154 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrapAdmin() {
+      return isVerified() && request.auth.token.email == 'akshanshmishra5@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrapAdmin() ||
+        (isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTicket(data) {
+      return data.keys().hasAll([
+          'ticketCode', 'title', 'summary', 'category', 'priority',
+          'status', 'employeeName', 'department', 'source',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ticketCode', 'title', 'summary', 'category', 'priority',
+          'status', 'employeeName', 'department', 'source',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.ticketCode is string && data.ticketCode.size() >= 4 && data.ticketCode.size() <= 24 && data.ticketCode.matches('^[A-Z0-9\\-]+$')
+        && data.title is string && data.title.size() >= 3 && data.title.size() <= 140
+        && data.summary is string && data.summary.size() >= 5 && data.summary.size() <= 1200
+        && data.category is string && data.category in ['Security', 'IT Access', 'Hardware', 'Payroll', 'Facilities']
+        && data.priority is string && data.priority in ['P0', 'P1', 'P2', 'P3']
+        && data.status is string && data.status in ['open', 'in_progress', 'escalated', 'resolved']
+        && data.employeeName is string && data.employeeName.size() >= 2 && data.employeeName.size() <= 80
+        && data.department is string && data.department.size() >= 2 && data.department.size() <= 60
+        && data.source is string && data.source in ['voice', 'chat', 'manual']
+        && data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRequest(data) {
+      return data.keys().hasAll([
+          'requestCode', 'type', 'title', 'reason', 'dateRange',
+          'status', 'employeeName', 'department',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'requestCode', 'type', 'title', 'reason', 'dateRange',
+          'status', 'employeeName', 'department', 'reviewerNote',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.requestCode is string && data.requestCode.size() >= 4 && data.requestCode.size() <= 24 && data.requestCode.matches('^[A-Z0-9\\-]+$')
+        && data.type is string && data.type in ['WFH', 'PTO', 'Equipment', 'Travel', 'Access']
+        && data.title is string && data.title.size() >= 3 && data.title.size() <= 140
+        && data.reason is string && data.reason.size() >= 5 && data.reason.size() <= 1000
+        && data.dateRange is string && data.dateRange.size() >= 2 && data.dateRange.size() <= 80
+        && data.status is string && data.status in ['pending', 'approved', 'declined']
+        && data.employeeName is string && data.employeeName.size() >= 2 && data.employeeName.size() <= 80
+        && data.department is string && data.department.size() >= 2 && data.department.size() <= 60
+        && (!('reviewerNote' in data) || (data.reviewerNote is string && data.reviewerNote.size() <= 500))
+        && data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /admins/{userId} {
+      allow get: if isVerified() && isValidId(userId) && (request.auth.uid == userId || isBootstrapAdmin());
+      allow list, create, update, delete: if false;
+    }
+
+    match /tickets/{ticketId} {
+      allow get: if isVerified() && isValidId(ticketId) && (existing().ownerUid == request.auth.uid || isAdmin());
+      allow list: if isVerified() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+
+      allow create: if isVerified()
+        && isValidId(ticketId)
+        && isValidTicket(incoming())
+        && incoming().ownerUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && incoming().status in ['open', 'escalated'];
+
+      allow update: if isVerified()
+        && isValidId(ticketId)
+        && isValidTicket(incoming())
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Tier 1: Ops Admin can transition status, priority, or summary
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'priority', 'summary', 'updatedAt'])) ||
+          // Tier 2: Owner can update summary while not resolved
+          (existing().ownerUid == request.auth.uid
+            && existing().status != 'resolved'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['summary', 'updatedAt']))
+        );
+
+      allow delete: if isVerified() && isValidId(ticketId) && (existing().ownerUid == request.auth.uid || isAdmin());
+    }
+
+    match /requests/{requestId} {
+      allow get: if isVerified() && isValidId(requestId) && (existing().ownerUid == request.auth.uid || isAdmin());
+      allow list: if isVerified() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+
+      allow create: if isVerified()
+        && isValidId(requestId)
+        && isValidRequest(incoming())
+        && incoming().ownerUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && incoming().status == 'pending';
+
+      allow update: if isVerified()
+        && isValidId(requestId)
+        && isValidRequest(incoming())
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Tier 1: Ops Admin can approve or decline requests with optional reviewer note
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'reviewerNote', 'updatedAt'])) ||
+          // Tier 2: Requester can edit reason or dateRange only while pending
+          (existing().ownerUid == request.auth.uid
+            && existing().status == 'pending'
+            && incoming().status == 'pending'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['reason', 'dateRange', 'updatedAt']))
+        );
+
+      allow delete: if isVerified() && isValidId(requestId) && (existing().ownerUid == request.auth.uid || isAdmin());
+    }
+  }
+}
